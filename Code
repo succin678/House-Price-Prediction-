@@ -1,0 +1,332 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.stats import skew, norm
+from scipy.special import boxcox1p
+from scipy.stats import boxcox_normmax
+from scipy.stats.stats import pearsonr
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split,GridSearchCV, cross_val_score, RepeatedStratifiedKFold, StratifiedKFold
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+
+from sklearn.pipeline import make_pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, Lasso, RidgeCV, LassoCV, ElasticNetCV
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.metrics import mean_squared_error, make_scorer
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import KFold
+from sklearn.model_selection import RepeatedStratifiedKFold
+
+import xgboost as xgb
+import lightgbm as lgb
+from xgboost import XGBRegressor
+
+import warnings
+warnings.filterwarnings(action="ignore")
+
+%matplotlib inline
+######################################################################
+
+df1 = pd.read_csv('train.csv', index_col='Id')
+df2 = pd.read_csv('test.csv', index_col='Id')
+
+####check outliers###
+fig, ax = plt.subplots()
+ax.scatter(x = df1['GrLivArea'], y = df1['SalePrice'])
+plt.ylabel('SalePrice', fontsize=13)
+plt.xlabel('GrLivArea', fontsize=13)
+plt.show()
+
+###remove outliers###
+df1 = df1.drop(df1[(df1['GrLivArea']>4000) & (df1['SalePrice']<300000)].index)
+
+###without outliers###
+fig, ax = plt.subplots()
+ax.scatter(x = df1['GrLivArea'], y = df1['SalePrice'])
+plt.ylabel('SalePrice', fontsize=13)
+plt.xlabel('GrLivArea', fontsize=13)
+plt.show()
+
+###check distribution of SalePrice###
+price = df1['SalePrice']
+plt.figure(figsize=(12,6))
+sns.distplot(price)
+
+###log transform target variable###
+df1["SalePrice"] = np.log1p(df1["SalePrice"])
+plt.figure(figsize=(12,6))
+sns.distplot(df1['SalePrice'])
+
+###Train set and train label###
+train_label = df1['SalePrice'].reset_index(drop=True)
+train_set = df1.drop(columns='SalePrice')
+df = pd.concat([train_set, df2])
+
+###check details of each column###
+def basic_details(df):
+    b = pd.DataFrame()
+    b['N unique value'] = df.nunique()
+    b['dtype'] = df.dtypes
+    return b
+pd.set_option('display.max_rows', None)
+basic_details(df)
+
+###correlation heatmap for Train dataset###
+cor = df1.corr()
+plt.figure(figsize=(14,14))
+sns.heatmap(cor,cmap="YlGnBu")
+###number of variables for heatmap###
+k = 10 
+cols = cor.nlargest(k, 'SalePrice')['SalePrice'].index
+print(cols)
+
+###check missing value###
+vars_with_missing = []
+
+for f in df.columns:
+    missings = df[f].isnull().sum() + len(df[df[f]=='MISSING'])
+    if missings > 0:
+        vars_with_missing.append(f)
+        missings_perc = missings/df.shape[0]
+        
+        print('Variable {} has {} records ({:.2%}) with missing values'.format(f, missings, missings_perc))
+print('In total, there are {} variables with missing values'.format(len(vars_with_missing)))
+
+###drop columns with high percentage missing values###
+df = df.drop(columns=['Alley','PoolQC','Fence','MiscFeature','FireplaceQu'])
+
+#For Garage related features, NA means no garage, replace NA with None/0
+for col in ('GarageType', 'GarageFinish', 'GarageQual', 'GarageCond'):
+    df[col] = df[col].fillna('None')
+for col in ('GarageCars', 'GarageArea', 'GarageYrBlt'):
+    df[col]=df[col].fillna(0)
+
+#For Basement related features, NA means no basement, replace NA with None/0
+for col in ('BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2'):
+    df[col] = df[col].fillna('None') 
+for col in ('BsmtFinSF1', 'BsmtFinSF2','BsmtUnfSF','TotalBsmtSF','BsmtFullBath', 'BsmtHalfBath'):
+    df[col] = df[col].fillna(0)
+
+#For Masonry features, replace NA with None
+df['MasVnrType']=df['MasVnrType'].fillna('None')
+df['MasVnrArea']=df['MasVnrArea'].fillna(0)
+
+#For MSZoning, Utilities, Exterior1st, Exterior2nd  features, replace NA with mode
+df['MSZoning']=df['MSZoning'].fillna(df['MSZoning'].mode()[0])
+df['Utilities']=df['Utilities'].fillna(df['Utilities'].mode()[0])
+df['Exterior1st'] = df['Exterior1st'].fillna(df['Exterior1st'].mode()[0])
+df['Exterior2nd'] = df['Exterior2nd'].fillna(df['Exterior2nd'].mode()[0])
+
+#For LotFrontage feature, replace NA with median
+df['LotFrontage']=df.groupby('Neighborhood')['LotFrontage'].transform(lambda x: x.fillna(x.median()))
+
+#For Functional feature, replace NA with Typ
+df['Functional'] = df['Functional'].fillna('Typ')
+
+#For KitchenQual, Electrical and SaleType, replace NA with mode
+df['KitchenQual'] = df['KitchenQual'].fillna(df['KitchenQual'].mode()[0])
+df['Electrical'] = df['Electrical'].fillna(df['Electrical'].mode()[0])
+df['SaleType'] = df['SaleType'].fillna(df['SaleType'].mode()[0])
+
+vars_with_missing = []
+for f in df.columns:
+    missings = df[f].isnull().sum() + len(df[df[f]=='MISSING'])
+    if missings > 0:
+        vars_with_missing.append(f)
+        missings_perc = missings/df.shape[0]
+        
+        print('Variable {} has {} records ({:.2%}) with missing values'.format(f, missings, missings_perc))        
+print('In total, there are {} variables with missing values'.format(len(vars_with_missing)))
+
+###Convert certain features to categorical###
+df['MSSubClass'] = df['MSSubClass'].astype(str)
+df['OverallQual'] = df['OverallQual'].astype(str)
+df['OverallCond'] = df['OverallCond'].astype(str)
+df['MoSold'] = df['MoSold'].astype(str)
+df['YrSold'] = df['YrSold'].astype(str)
+df['YearBuilt']=df['YearBuilt'].astype(str)
+df['YearRemodAdd']=df['YearRemodAdd'].astype(str)
+
+#Categorical features
+cols = ('OverallQual', 'OverallCond', 'ExterQual','ExterCond', 'BsmtQual', 'BsmtCond','BsmtExposure',
+        'BsmtFinType1','BsmtFinType2', 'HeatingQC','KitchenQual','GarageQual', 'GarageCond', 'YearBuilt', 
+        'YearRemodAdd')
+# process columns, apply LabelEncoder to categorical features
+for c in cols:
+    lbl = LabelEncoder() 
+    lbl.fit(list(df[c].values)) 
+    df[c] = lbl.transform(list(df[c].values))
+# shape        
+print('Shape all_data: {}'.format(df.shape))
+
+#Normalize skewed features
+numeric_feats = df.dtypes[df.dtypes != "object"].index
+
+# Check the skew of all numerical features
+skewed_feats = df[numeric_feats].apply(lambda x: skew(x.dropna())).sort_values(ascending=False)
+print("\nSkew in numerical features: \n")
+skewness = pd.DataFrame({'Skew' :skewed_feats})
+skewness.head(10)
+
+skewness = skewness[abs(skewness) > 0.5]
+print("There are {} skewed numerical features to Box Cox transform".format(skewness.shape[0]))
+
+from scipy.special import boxcox1p
+skewed_features = skewness.index
+lam = 0.15
+for col in skewed_features:
+    df[col] = boxcox1p(df[col], boxcox_normmax(df[col] + 1))
+
+skewed_feats = df[numeric_feats].apply(lambda x: skew(x.dropna())).sort_values(ascending=False)
+print("\nSkew in numerical features: \n")
+skewness = pd.DataFrame({'Skew' :skewed_feats})
+skewness.head(10)
+
+#one hot encoding for categorical data
+tot_cat_col = ('MSSubClass', 'MSZoning', 'Street', 'LotShape','LandContour','Utilities','LotConfig','LandSlope',
+              'Neighborhood', 'Condition1', 'Condition2', 'BldgType','HouseStyle', 'RoofStyle', 'RoofMatl',
+              'Exterior1st', 'Exterior2nd', 'MasVnrType', 'Foundation', 'Heating', 'CentralAir', 'Electrical',
+              'Functional', 'GarageType', 'GarageFinish', 'PavedDrive', 'MoSold', 'YrSold', 'SaleType', 'SaleCondition')
+def OHE(df, column):
+    cat_col = column
+    #cat_col = df.select_dtypes(include =['category']).columns
+    len_df = df.shape[0]
+    c2,c3 = [],{}
+    
+    print('Categorical feature',len(column))
+    for c in cat_col:
+        if df[c].nunique()>=2 :
+            c2.append(c)
+            c3[c] = 'ohe_'+c
+    
+    df = pd.get_dummies(df, prefix=c3, columns=c2,drop_first=True)
+
+    print('Train',df.shape)
+    return df
+
+train_1 = OHE(df,tot_cat_col)
+
+#train test split
+train = train_1[:df1.shape[0]] 
+test = train_1[df1.shape[0]:]
+
+#K-fold cross validation 
+K = 5
+cv = KFold(n_splits = K, random_state = 42, shuffle = True)
+
+# Define error metrics
+#Validation function
+def rmsle_cv(model):
+    kf = cv.get_n_splits(train.values)
+    rmse= np.sqrt(-cross_val_score(model, train.values, train_label.values, scoring="neg_mean_squared_error", cv = kf))
+    return(rmse)
+    
+#Linear Regression Model
+lasso = make_pipeline(RobustScaler(), Lasso(alpha =0.0005, random_state=1))
+from sklearn.linear_model import ElasticNet, Lasso,  BayesianRidge, LassoLarsIC
+from sklearn.ensemble import RandomForestRegressor,  GradientBoostingRegressor
+from sklearn.kernel_ridge import KernelRidge
+ENet = make_pipeline(RobustScaler(), ElasticNet(alpha=0.0005, l1_ratio=.9, random_state=3))
+#Ridge Regression Model
+ridge_alphas = [1e-15, 1e-10, 1e-8, 9e-4, 7e-4, 5e-4, 3e-4, 1e-4, 1e-3, 5e-2, 1e-2, 0.1, 0.3, 1, 3, 5, 10, 15, 18, 20, 30, 50, 75, 100]
+ridge = make_pipeline(RobustScaler(), RidgeCV(alphas=ridge_alphas, cv=cv))
+#XGB Model
+model_xgb = xgb.XGBRegressor(colsample_bytree=0.4603, gamma=0.0468, 
+                             learning_rate=0.05, max_depth=3, 
+                             min_child_weight=1.7817, n_estimators=2200,
+                             reg_alpha=0.4640, reg_lambda=0.8571,
+                             subsample=0.5213, silent=1,
+                             random_state =7, nthread = -1)
+#Light GBM
+model_lgb = lgb.LGBMRegressor(objective='regression',num_leaves=5,
+                              learning_rate=0.01, n_estimators=7000,
+                              max_bin = 200, bagging_fraction = 0.8,
+                              bagging_freq = 4, feature_fraction = 0.2319,
+                              feature_fraction_seed=8, bagging_seed=8,
+                              min_data_in_leaf =6, min_sum_hessian_in_leaf = 11,
+                             random_state=42)
+#stacking model
+from mlxtend.regressor import StackingCVRegressor
+stack_gen = StackingCVRegressor(regressors=(model_xgb, model_lgb, ridge, lasso),
+                                meta_regressor=model_xgb,
+                                use_features_in_secondary=True)
+score_lasso = rmsle_cv(lasso)
+print("\nLasso score: {:.4f} ({:.4f})\n".format(score_lasso.mean(), score_lasso.std()))
+score_ridge = rmsle_cv(ridge)
+print("\nRidge score: {:.4f} ({:.4f})\n".format(score_ridge.mean(), score_ridge.std()))
+score_enet = rmsle_cv(ENet)
+print("ElasticNet score: {:.4f} ({:.4f})\n".format(score_enet.mean(), score_enet.std()))
+score_xgb = rmsle_cv(model_xgb)
+print("Xgboost score: {:.4f} ({:.4f})\n".format(score_xgb.mean(), score_xgb.std()))
+score_lgb = rmsle_cv(model_lgb)
+print("Lgb score: {:.4f} ({:.4f})\n".format(score_lgb.mean(), score_lgb.std()))
+
+###fitting model###
+model_lasso = lasso.fit(train, train_label)
+pred_lasso = lasso.predict(test)
+
+model_ridge = ridge.fit(train, train_label)
+pred_ridge = ridge.predict(test)
+
+model_xgb = model_xgb.fit(train, train_label)
+pred_xgb = model_xgb.predict(test)
+
+model_lgb = model_lgb.fit(train, train_label)
+pred_lgb = model_lgb.predict(test)
+
+model_enet = ENet.fit(train, train_label)
+pred_enet = ENet.predict(test)
+
+model_stack_gen = stack_gen.fit(np.array(train), np.array(train_label))
+pred_stack_gen=stack_gen.predict(np.array(test))
+
+
+#blend model
+def blended_predictions(X):
+    return ((0.1 * lasso.predict(X)) + \
+            (0.1 * ridge.predict(X)) + \
+            (0.2 * model_lgb.predict(X)) + \
+            (0.1 * ENet.predict(X)) + \
+            (0.1 * model_xgb.predict(X)) + \
+            (0.4 * stack_gen.predict(np.array(X))))
+score_blended = np.sqrt(mean_squared_error(y, blended_predictions(X)))
+print(score_blended)
+
+scores = [score_lasso.mean(), score_ridge.mean(), score_enet.mean(), score_xgb.mean(), score_lgb.mean(), score_blended]
+bonus = (max(scores) - min(scores))/50
+# Plot the predictions for each model
+fig = plt.figure(figsize=(24, 12))
+
+ax = sns.pointplot(x=['Lasso', 'Ridge', 'ENet', 'XGB', 'LGB', 'Blended'], y=scores, markers=['o'], linestyles=['-'])
+[ax.text(p[0], p[1]+bonus, p[1], color='g') for p in zip(ax.get_xticks(), scores)]
+plt.ylabel('Score (RMSE)', size=20, labelpad=12.5)
+plt.xlabel('Model', size=20, labelpad=12.5)
+plt.tick_params(axis='x', labelsize=13.5)
+plt.tick_params(axis='y', labelsize=12.5)
+
+plt.title('Scores of Models', size=20)
+fig.savefig('Score.png')
+
+plt.show()
+
+
+pred = blended_predictions(test)
+
+price = pd.read_csv('test_actual_price.csv')
+price = price.sort_values(by='Id')
+o = price.SalePrice
+p = np.expm1(pred)
+
+mape = np.mean(np.abs(o - p) / o)
+print(mape)
+
+submission = pd.DataFrame({'Id':b['Id'], 'SalePrice':np.int_(price)})
+#submission = pd.DataFrame({'Id':b['Id'], 'SalePrice':test_predictions})
+submission.head()
+#exporting submission.csv
+submission.to_csv('submission_DOJ.csv', index=False)
+
